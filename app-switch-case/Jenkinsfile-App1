@@ -1,0 +1,119 @@
+def noechosh(cmd) {
+    sh('#!/bin/sh -e\n' + cmd)
+}
+
+pipeline {
+    agent {
+        label 'master-node'
+    }
+
+    parameters {
+        choice choices: ['DEV','QA','PROD'], description: 'Target Environment', name: 'ENVIRONMENT'
+        choice choices: ['COM','ES','IT'], description: 'Target Network', name: 'NETWORK'
+    }
+    
+    options {
+        timeout(time: 30, unit: 'SECONDS')
+        buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '9')
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    // Load Environment Vars per Environment:
+                    switch("${params.ENVIRONMENT}".toLowerCase()) {
+                        case "dev":
+                            noechosh("figlet DEV")
+                            SERVERS_LIST = "${WORKSPACE}/.envvars/lobby/dev-servers.groovy"
+                            AGENT_NODE = "master-node"
+                            break
+                        case "qa":
+                            noechosh("figlet QA")
+                            SERVERS_LIST = "${WORKSPACE}/.envvars/lobby/qa-servers.groovy"
+                            AGENT_NODE = "ansible_in_qa"
+                            break
+                        case "prod":
+                            // AGENT_ENV = "ansible_in_qa"
+                            noechosh("figlet PROD")
+                            SERVERS_LIST = "${WORKSPACE}/.envvars/lobby/prod-servers.groovy"
+                            AGENT_NODE = "ansible_dublin_prod"
+                            break
+                        default:
+                            autoCancelled = true
+                            error('Unable to Determine the Environment, exiting...')
+                            break
+                    }
+                }
+            }
+        }
+        
+        stage('Get the Network Port') {
+            steps {
+                script {
+                    switch("${params.NETWORK}".toLowerCase()) {
+                        case "com":
+                            noechosh("figlet COM")
+                            PORT="40021"
+                            break
+                        case "es":
+                            noechosh("figlet ES")
+                            PORT="40022"
+                            break
+                        case "it":
+                            noechosh("figlet IT")
+                            PORT="40024"
+                            break
+                        default:
+                            result = "unidentified"
+                            autoCancelled = true
+                            noechosh("figlet ${params.mode}")
+                            break
+                    }
+                }   
+            }
+        }
+        
+        stage('Set the Jenkins Build Name') {
+            steps {
+                script {
+                    currentBuild.displayName = "${params.ENVIRONMENT}_${params.NETWORK}_LOBBY"
+                    echo "Creating Build: ${currentBuild.displayName}"
+                }
+            }
+        }
+        
+        stage('Get the Version') {
+            agent {
+                label "${AGENT_NODE}"
+            }
+            options {
+                skipDefaultCheckout true
+            }
+            steps {
+                script {
+                    filename = "${SERVERS_LIST}"
+                    File fh2 = new File(filename)
+                    def servers = fh2.readLines()
+                    for (server in servers) {
+                        sh """
+                        set +x
+                        echo "********************"
+                        curl -X GET -s http://${server}:${PORT}/env | grep 'Machine Name' | xargs
+                        curl -X GET -s http://${server}:${PORT}/env | grep 'Assembly Name' | xargs
+                        curl -X GET -s http://${server}:${PORT}/env | grep 'Assembly Version' | xargs
+                        echo "********************"
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {  
+        success {  
+            emailext attachLog: true, body: "<b>[Poker New Lobby] - Version check</b><br>Environment: ${params.ENVIRONMENT} <br>Network: ${params.NETWORK} <br>Build URL: ${env.BUILD_URL}<br>", from: 'k8s-jenkins@888holdings.com', mimeType: 'text/html', subject: "[Poker New Lobby] - Version check for ${params.ENVIRONMENT} environment in ${params.NETWORK} network", to: "adam.kaplun@888holdings.com,Tamir.Kwartler@888holdings.com,Coby.Rosenfeld@888holdings.com"
+        }  
+    }
+
+}
