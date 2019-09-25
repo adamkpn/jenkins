@@ -1,0 +1,206 @@
+def modules = [:]
+pipeline {
+    agent {
+        label 'master-node'
+    }
+    
+    parameters {
+        // //////////////// //
+        // VERSION TO BUILD //
+        // //////////////// //
+        extendedChoice bindings: '', description: 'Version number you want to build', groovyClasspath: '', groovyScript: '''import groovy.json.JsonSlurper
+        def recurse 
+        def versionArraySort = { a1, a2 -> 
+            def headCompare = a1[0] <=> a2[0] 
+            if (a1.size() == 1 || a2.size() == 1 || headCompare != 0) { 
+                return headCompare 
+            } else { 
+                return recurse(a1[1..-1], a2[1..-1]) 
+            } 
+        } 
+        recurse = versionArraySort
+        def versionStringSort = { s1, s2 -> 
+            def nums = { it.tokenize(\'.\').collect{ it.toInteger() } } 
+            versionArraySort(nums(s1), nums(s2)) 
+        }
+        try {
+        	List<String> artifacts = new ArrayList<String>()
+        	def artifactsUrl = "http://artifactoryprod:8081/artifactory/api/storage/app/linux-x64"          
+        	def artifactsObjectRaw = \'curl http://artifactoryprod:8081/artifactory/api/storage/app/linux-x64\'.execute() | \'jq -r .children\'.execute()
+        		artifactsObjectRaw.waitFor()
+        
+        	def jsonSlurper = new JsonSlurper()
+        	def artifactsJsonObject = jsonSlurper.parseText(artifactsObjectRaw.text)
+        	for(item in artifactsJsonObject){
+                artifacts.add(item.uri.replaceAll(\'/\',\'\'))
+            } 
+            return artifacts.sort(versionStringSort).reverse()
+        } catch (Exception e) {
+            print "There was a problem fetching the artifacts"
+        }''', multiSelectDelimiter: ',', name: 'VERSION_TO_BUILD', quoteValue: false, saveJSONParameterToFile: false, type: 'PT_SINGLE_SELECT', visibleItemCount: 3
+            
+            // //////////////////////// //
+            // EVIRONMENT TO BUILD INTO //
+            // //////////////////////// //
+          extendedChoice bindings: '', description: 'Environment to Deploy the new version to', groovyClasspath: '', groovyScript: '''try {
+        	List<String> temp_artifacts = new ArrayList<String>()
+            List<String> temp2_artifacts = new ArrayList<String>()
+            List<String> artifacts = new ArrayList<String>()
+        	def artifactsUrl = "http://artifactoryprod:8081/artifactory/api/storage/app/linux-x64/1.0.6.9/AppConfig"          
+        	def sout = new StringBuilder(), serr = new StringBuilder()
+        	def artifactsObjectRaw = "curl ${artifactsUrl}".execute() | "jq .children".execute() | "jq .[].uri".execute()
+        	artifactsObjectRaw.consumeProcessOutput(sout, serr)
+        	artifactsObjectRaw.waitForOrKill(1000)
+        
+        	def list = sout.readLines()
+        	for(item in list){
+              	temp_artifacts.add(item.replaceAll(\'/\',\'\'))
+            }  
+          	for(item in temp_artifacts) {
+           	 	temp2_artifacts.add(item.replaceAll(\'.zip\',\'\'))
+           
+        	}
+          	for(item in temp2_artifacts) {
+           	 	artifacts.add(item.replaceAll(\'"\',\'\')) 
+        	}
+          	return artifacts
+        } catch (Exception e) {
+            print "There was a problem fetching the artifacts"
+        }''', multiSelectDelimiter: ',', name: 'ENVIRONMENT', quoteValue: false, saveJSONParameterToFile: false, type: 'PT_SINGLE_SELECT', visibleItemCount: 3
+
+            // ////////////////// //
+            // REGULATION NETWORK //
+            // ////////////////// //
+            choice choices: ['COM', 'ES', 'IT'], description: 'Regulation Network', name: 'NETWORK'
+    }
+    
+    options {
+      buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '9')
+      disableConcurrentBuilds()
+      timestamps()
+    }
+
+    stages{
+        stage("Set the Build Name") {
+            steps {
+                script {
+                    currentBuild.displayName = "${VERSION_TO_BUILD}-${ENVIRONMENT}-${NETWORK}"
+                    echo "${currentBuild.displayName}"
+                }
+            }
+        }
+
+        stage("Define Parameters per Network") {
+            steps {
+                script {
+                    // Check the Network param and import the appropriate file
+                    switch("${params.NETWORK}".toLowerCase()) {
+                        case "com":
+                            load "${WORKSPACE}/.envvars/com-network.groovy"
+                            break
+                        case "es":
+                            load "${WORKSPACE}/.envvars/es-network.groovy"
+                            break
+                        case "it":
+                            load "${WORKSPACE}/.envvars/it-network.groovy"
+                            break
+                        default:
+                            autoCancelled = true
+                            error('Unable to Determine the Network, exiting...')
+                            break
+                    }
+                }
+            }
+        }
+            
+        stage("Show all defined variables") {
+            steps {
+                echo """
+HEALTH_PORT: ${env.HEALTH_PORT}
+METRICS_PORT: ${env.METRICS_PORT}
+SERVICE_PORT: ${env.SERVICE_PORT}
+"""
+            }
+        }
+        
+        stage("Checkout from Ansible Repo"){
+            steps{
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'ansible/deploy']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'jenkins-deployment', url: 'git@gitlab.production-qa.com:adamka1/ansible.git']]])
+            }
+        }
+        
+        stage("Pull the version files from Artifactory"){
+            steps{
+                // Download the chosen version of "Poker Lobby Service"
+                sh '''export VERSION_NUM=$(curl -X GET "http://artifactoryprod:8081/artifactory/api/storage/app/linux-x64/${VERSION_TO_BUILD}/App/Poker.Infra.Lobby.WebApi.NetCore.zip" | jq -r '.uri') && 
+                      export D_VERSION_NUM=$(curl $VERSION_NUM | jq -r '.downloadUri') && 
+                      echo $D_VERSION_NUM && 
+                      wget -nv $D_VERSION_NUM -P /$WORKSPACE'''
+
+                // Download the environment configuration files per chosen version of "Poker Lobby Service"                      
+                sh '''export ENV_URI=$(curl -X GET "http://artifactoryprod:8081/artifactory/api/storage/app/linux-x64/${VERSION_TO_BUILD}/AppConfig/${ENVIRONMENT}.zip" | jq -r '.uri') && 
+                      echo $ENV_URI
+                      export D_ENV_URI=$(curl $ENV_URI | jq -r '.downloadUri') && 
+                      echo $D_ENV_URI
+                      wget -nv $D_ENV_URI -P /$WORKSPACE'''      
+                    
+            }
+        }
+        
+        stage("Deploy") {
+            steps {
+                script {
+                    // Check the Environment params and Set the Ansible :
+                    switch("${params.ENVIRONMENT}".toLowerCase()) {
+                        case "mgm":
+                            INVENTORY = "${WORKSPACE}/ansible/inventories/app-servers-qa.ini"
+                            CREDID = 'ansible_root_mgm'
+                            break
+                        case "dev":
+                            INVENTORY = "${WORKSPACE}/ansible/inventories/app-servers-dev.ini"
+                            CREDID = 'ansible_root_dev'
+                            break
+                        case "prod":
+                            INVENTORY = "${WORKSPACE}/ansible/inventories/app-servers-prod.ini"
+                            CREDID = 'ansible_root_prod'
+                            break
+                        default:
+                            autoCancelled = true
+                            error('Unable to Determine the Environment, exiting...')
+                            break
+                    }
+                    ansiColor('xterm') {
+                        ansiblePlaybook(
+                            colorized: true, 
+                            credentialsId: "${CREDID}", 
+                            disableHostKeyChecking: true,
+                            inventory: "${INVENTORY}",
+                            installation: 'ansible', 
+                            playbook: "${WORKSPACE}/ansible/deploy/app.yaml",
+                        )
+                    }
+                }
+            }
+        }
+        
+        stage("Cleanup"){
+            steps{
+                echo 'Removing any Ansible left RETRY files'
+                sh 'rm -f *.retry'
+                echo 'Removing any Ansible INVENTORY files'
+                sh 'rm -f *.ini'
+                echo 'Removing old Archives'
+                sh 'rm -f *.zip*'
+            }
+        }
+    }
+    post {  
+        success {  
+            echo 'Build process comleted successfully'
+            emailext attachLog: true, body: "<b>Deploy process SUCCEEDED</b><br>Project: ${env.JOB_NAME} <br>Environment: ${params.ENVIRONMENT} <br>Network: ${params.NETWORK} <br>Build Number: ${currentBuild.displayName} <br> Build URL: ${env.BUILD_URL}", from: 'k8s-jenkins@888holdings.com', mimeType: 'text/html', subject: "OK, Deploy process SUCCEEDED: Project name -> ${env.JOB_NAME}", to: "adam.kaplun@888holdings.com,PokerServersGroup@users.888holdings.com"  
+        }  
+        failure {  
+            emailext attachLog: true, body: "<b>Deploy process FAILED</b><br>Project: ${env.JOB_NAME} <br>Environment: ${params.ENVIRONMENT} <br>Network: ${params.NETWORK} <br>Build Number: ${currentBuild.displayName} <br> Build URL: ${env.BUILD_URL}", from: 'k8s-jenkins@888holdings.com', mimeType: 'text/html', subject: "ERROR, Deploy process FAILED: Project name -> ${env.JOB_NAME}", to: "adam.kaplun@888holdings.com,PokerServersGroup@users.888holdings.com"
+        }  
+    }
+}

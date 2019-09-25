@@ -1,0 +1,32 @@
+==================================
+cat <<EOF> /opt/archive_old_files.sh
+cd /var/log/app_com
+find /var/log/app_com -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+cd /var/log/app_es
+find /var/log/app_es -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+cd /var/log/app_com
+find /var/log/app_com -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+EOF
+chmod +x /opt/archive_old_files.sh
+
+crontab -e
+SHELL=/bin/bash
+0 1 * * * /bin/bash /opt/archive_old_files.sh >> /tmp/archive_old_files_last_exit_code 2>&1
+systemctl restart crond.service
+
+==================================
+vi /opt/archive_old_files.sh
+cd /var/log/app_com
+find /var/log/app_com -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+cd /var/log/app_es
+find /var/log/app_es -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+cd /var/log/app_com
+find /var/log/app_com -maxdepth 1 -mtime +1 -type f -printf "%TY%Tm%Td %p\n" | while read date name ; do zip $date $name; rm -rf $name; done
+
+chmod +x /opt/archive_old_files.sh
+
+crontab -e
+SHELL=/bin/bash
+0 1 * * * /bin/bash /opt/archive_old_files.sh >> /tmp/archive_old_files_last_exit_code 2>&1
+systemctl restart crond.service
+==================================
